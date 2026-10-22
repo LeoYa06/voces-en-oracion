@@ -1,45 +1,59 @@
 #!/usr/bin/env python3
-"""Obtain the official Spanish USCCB RSS and extract the Gospel section."""
-import urllib.request, xml.etree.ElementTree as ET, re, json, datetime, html
+"""Extrae el Evangelio de la fecha local desde el RSS de USCCB."""
+import datetime
+import html
+import json
+import re
+import urllib.request
+import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-class PlainText(HTMLParser):
-    def __init__(self): super().__init__(); self.parts=[]
+class Sections(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.sections=[]; self.heading=None; self.collect=False; self.parts=[]
     def handle_starttag(self, tag, attrs):
-        if tag in ('p','div','br','h2','h3','h4','li'): self.parts.append('\n')
-    def handle_data(self, data): self.parts.append(data)
+        if tag == 'h4': self.heading=[]
+        elif tag == 'div' and 'poetry' in dict(attrs).get('class','').split():
+            self.collect=True; self.parts=[]
+        elif self.collect and tag in ('p','br'): self.parts.append('\n' if tag=='p' else ' ')
+    def handle_data(self, data):
+        if self.heading is not None: self.heading.append(data)
+        if self.collect: self.parts.append(data)
+    def handle_endtag(self, tag):
+        if tag == 'h4' and self.heading is not None:
+            self.current_heading=' '.join(self.heading).strip(); self.heading=None
+        if tag == 'div' and self.collect:
+            self.sections.append((getattr(self,'current_heading',''),html.unescape(''.join(self.parts)).strip()))
+            self.collect=False
 
-def text_only(value):
-    parser=PlainText();parser.feed(value or '')
-    return html.unescape(''.join(parser.parts)).replace('\xa0',' ')
+def extract(raw, today):
+    root=ET.fromstring(raw)
+    items=root.findall('./channel/item')
+    if not items: raise RuntimeError('RSS sin entradas')
+    for entry in items:
+        url=(entry.findtext('link') or '').strip()
+        # El enlace de USCCB incluye fecha en formato MMDDYY.
+        date_token=today.strftime('%m%d%y')
+        if f'/{date_token}.cfm' not in url: continue
+        body=entry.findtext('description') or ''
+        parser=Sections();parser.feed(body)
+        for heading,content in parser.sections:
+            if re.match(r'^Evangelio\b',heading,re.I) and len(content)>60:
+                citation=re.sub(r'^Evangelio\s*','',heading,flags=re.I).strip()
+                return {'fecha':today.isoformat(),'titulo':entry.findtext('title') or 'Evangelio del día',
+                        'cita':citation,'texto':content,'fuente':'USCCB','url':url}
+        raise RuntimeError('La entrada de hoy no incluye un bloque Evangelio reconocible')
+    raise RuntimeError('No hay una entrada RSS para la fecha de hoy (America/Chicago)')
 
-today=datetime.datetime.now(ZoneInfo('America/Chicago')).date().isoformat()
-req=urllib.request.Request('https://bible.usccb.org/lecturas.rss',headers={'User-Agent':'Mozilla/5.0 VocesEnOracion/1.0'})
-with urllib.request.urlopen(req,timeout=25) as response: raw=response.read()
-root=ET.fromstring(raw)
-items=root.findall('.//item')
-if not items:
-    items=root.findall('.//{http://www.w3.org/2005/Atom}entry')
-if not items: raise RuntimeError('El RSS no contiene entradas')
-entry=items[0]
-def field(name):
-    el=entry.find(name)
-    return ''.join(el.itertext()) if el is not None else ''
-body=field('description') or field('{http://purl.org/rss/1.0/modules/content/}encoded') or field('{http://www.w3.org/2005/Atom}content')
-plain=text_only(body)
-match=re.search(r'(?im)^\s*(?:\+\s*)?Evangelio\s*$',plain)
-if not match:
-    raise RuntimeError('No se encontró la sección Evangelio en el RSS; se conserva la versión anterior')
-section=plain[match.end():]
-section=re.split(r'(?im)^\s*(?:Reflexi[oó]n|Copyright|Los textos de la Sagrada Escritura)\b',section)[0]
-lines=[x.strip() for x in section.splitlines() if x.strip()]
-if len(lines)<2: raise RuntimeError('El Evangelio no tiene texto suficiente')
-cita=lines[0] if len(lines[0])<90 else ''
-texto='\n\n'.join(lines[1:] if cita else lines)
-if len(texto)<80: raise RuntimeError('Texto del Evangelio incompleto')
-payload={'fecha':today,'titulo':'Evangelio del día','cita':cita,'texto':texto,'fuente':'USCCB','url':'https://bible.usccb.org/es/lectura-diaria-biblia'}
-Path('public').mkdir(exist_ok=True)
-Path('public/evangelio.json').write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding='utf-8')
-print('Lectura preparada para',today,cita)
+def main():
+    today=datetime.datetime.now(ZoneInfo('America/Chicago')).date()
+    request=urllib.request.Request('https://bible.usccb.org/lecturas.rss',headers={'User-Agent':'Mozilla/5.0'})
+    with urllib.request.urlopen(request,timeout=30) as r: raw=r.read()
+    data=extract(raw,today)
+    Path('public').mkdir(exist_ok=True)
+    Path('public/evangelio.json').write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
+    print('Evangelio preparado:',data['fecha'],data['cita'])
+
+if __name__=='__main__':main()
