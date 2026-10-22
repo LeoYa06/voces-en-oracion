@@ -1,32 +1,41 @@
-name: Actualizar Evangelio diario
+name: Evangelio diario y publicación
 on:
+  workflow_dispatch:
   schedule:
     - cron: '15 12 * * *'
-  workflow_dispatch:
+  push:
+    branches: [main]
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
 jobs:
-  actualizar:
+  publicar:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Descargar Evangelio
+      - name: Preparar Evangelio del día
         run: python scripts/update_gospel.py
       - name: Compilar aplicación
         run: |
-          npm install
+          npm ci
           npm run build
-      - name: Publicar en la raíz para GitHub Pages
-        run: |
-          cp -R dist/. .
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A index.html assets logo-voces.png evangelio.json
-          git diff --cached --quiet || git commit -m "Actualizar Evangelio diario"
-          git push
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - id: deployment
+        uses: actions/deploy-pages@v4
